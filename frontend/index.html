@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+  <meta charset="UTF-8" />
+  <title>Book Translator (EN→PT)</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    body { font-family: system-ui, -apple-system, Arial; max-width: 720px; margin: 40px auto; padding: 0 16px; }
+    .card { border: 1px solid #ddd; border-radius: 8px; padding: 16px; }
+    button { padding: 10px 16px; border: 0; border-radius: 6px; cursor: pointer; }
+  </style>
+</head>
+<body>
+  <h2>Traduzir PDF (Inglês → Português)</h2>
+  <div class="card">
+    <form id="form">
+      <input type="file" name="file" accept=".pdf" required />
+      <label><input type="checkbox" name="organize" checked /> Organizar texto</label>
+      <br/><br/>
+      <button type="submit">Enviar</button>
+    </form>
+    <p id="status"></p>
+  </div>
+  <script>
+    const form = document.getElementById('form');
+    const statusEl = document.getElementById('status');
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      statusEl.textContent = "Processando… (pode levar alguns minutos para PDFs grandes)";
+      const fd = new FormData(form);
+      const res = await fetch('http://127.0.0.1:8000/upload', { method: 'POST', body: fd });
+      if (!res.ok) {
+        const t = await res.text();
+        statusEl.textContent = "Erro: " + t;
+        return;
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'traduzido.txt';
+      a.click();
+      statusEl.textContent = "Pronto! Baixei o arquivo traduzido.";
+    });
+  </script>
+</body>
+</html>
