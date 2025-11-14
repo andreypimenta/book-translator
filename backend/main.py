@@ -1,119 +1,120 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException, Form, Depends
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Body
 from fastapi.middleware.cors import CORSMiddleware
 import tempfile, shutil, requests
-from sqlalchemy.orm import Session
 
 from .extract import extract_text_from_pdf
 from .translate import libre_translate
 from .organize import organize_text
-from .db import Base, engine, SessionLocal
-from .models import Translation
-from .schemas import TranslationOut, URLRequest
 
-Base.metadata.create_all(bind=engine)
+app = FastAPI(title="Book Translator", version="0.2.0")
 
-app = FastAPI()
-
-# ========== CORS ==========
+# ========================
+# CORS
+# ========================
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],   # em produção, pode restringir p/ domínio do front
+    allow_origins=["*"],  # depois pode restringir p/ domínio do front
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# ========== DB DEPENDENCY ==========
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
-
-# ========== ENDPOINTS ==========
-
-@app.post("/upload_file", response_model=TranslationOut)
-async def upload_file(
-    file: UploadFile = File(...),
-    lang_source: str = Form("en"),
-    lang_target: str = Form("pt"),
-    organize: bool = Form(True),
-    db: Session = Depends(get_db),
-):
-    """
-    Recebe um PDF via multipart/form-data:
-      - file
-      - lang_source (ex: 'en')
-      - lang_target (ex: 'pt')
-      - organize (true/false)
-    """
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
-        shutil.copyfileobj(file.file, tmp)
-        temp_path = tmp.name
-
-    original_text = extract_text_from_pdf(temp_path)
+# ========================
+# HELPERS
+# ========================
+def _process_pdf_file(path: str, lang_source: str, lang_target: str, organize: bool):
+    original_text = extract_text_from_pdf(path)
     if not original_text.strip():
-        raise HTTPException(400, "Não foi possível extrair texto do PDF")
+        raise HTTPException(status_code=400, detail="Não foi possível extrair texto do PDF")
 
     translated = libre_translate(original_text, source=lang_source, target=lang_target)
 
     if organize:
         translated = organize_text(translated)
 
-    entry = Translation(original_text=original_text, translated_text=translated)
-    db.add(entry)
-    db.commit()
-    db.refresh(entry)
-    return entry
+    return {"original_text": original_text, "translated_text": translated}
 
+# ========================
+# ROTAS
+# ========================
 
-@app.post("/upload_url", response_model=TranslationOut)
-async def upload_url(
-    payload: URLRequest,
-    db: Session = Depends(get_db),
+@app.get("/health")
+def health():
+    return {"status": "ok"}
+
+# ---------- ROTA ANTIGA (COMPATÍVEL) ----------
+@app.post("/upload")
+async def upload_legacy(
+    file: UploadFile = File(...),
+    lang_source: str = Form("en"),
+    lang_target: str = Form("pt"),
+    organize: bool = Form(True),
 ):
     """
-    Espera JSON no formato:
+    Rota original /upload (mantida por compatibilidade).
+    """
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+        shutil.copyfileobj(file.file, tmp)
+        temp_path = tmp.name
+
+    return _process_pdf_file(temp_path, lang_source, lang_target, organize)
+
+# ---------- NOVO: /upload_file ----------
+@app.post("/upload_file")
+async def upload_file(
+    file: UploadFile = File(...),
+    lang_source: str = Form("en"),
+    lang_target: str = Form("pt"),
+    organize: bool = Form(True),
+):
+    """
+    Rota usada pelo frontend React:
+
+    formData.append('file', file);
+    formData.append('lang_source', 'en');
+    formData.append('lang_target', 'pt');
+    formData.append('organize', 'true');
+    """
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+        shutil.copyfileobj(file.file, tmp)
+        temp_path = tmp.name
+
+    return _process_pdf_file(temp_path, lang_source, lang_target, organize)
+
+# ---------- NOVO: /upload_url ----------
+@app.post("/upload_url")
+async def upload_url(
+    data: dict = Body(...)
+):
+    """
+    Espera JSON:
     {
-      "url": "...",
+      "url": "https://...",
       "lang_source": "en",
       "lang_target": "pt",
       "organize": true
     }
     """
-    r = requests.get(payload.url)
-    if r.status_code != 200:
-        raise HTTPException(400, "URL inválida ou inacessível")
+    url = data.get("url")
+    if not url:
+        raise HTTPException(status_code=400, detail="Campo 'url' é obrigatório")
+
+    lang_source = data.get("lang_source", "en")
+    lang_target = data.get("lang_target", "pt")
+    organize = bool(data.get("organize", True))
+
+    resp = requests.get(url)
+    if resp.status_code != 200:
+        raise HTTPException(status_code=400, detail="URL inválida ou inacessível")
 
     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
-        tmp.write(r.content)
+        tmp.write(resp.content)
         temp_path = tmp.name
 
-    original_text = extract_text_from_pdf(temp_path)
-    if not original_text.strip():
-        raise HTTPException(400, "Não foi possível extrair texto do PDF")
+    return _process_pdf_file(temp_path, lang_source, lang_target, organize)
 
-    translated = libre_translate(original_text, source=payload.lang_source, target=payload.lang_target)
-
-    if payload.organize:
-        translated = organize_text(translated)
-
-    entry = Translation(original_text=original_text, translated_text=translated)
-    db.add(entry)
-    db.commit()
-    db.refresh(entry)
-    return entry
-
-
-@app.get("/translations", response_model=list[TranslationOut])
-def list_translations(db: Session = Depends(get_db)):
-    return db.query(Translation).all()
-
-
-@app.get("/translations/{id}", response_model=TranslationOut)
-def get_translation(id: int, db: Session = Depends(get_db)):
-    entry = db.query(Translation).filter(Translation.id == id).first()
-    if not entry:
-        raise HTTPException(404, "Not found")
-    return entry
+# ---------- WEBHOOK WHATSAPP (STUB) ----------
+@app.post("/webhook/whatsapp/connection-update")
+async def whatsapp_webhook_stub(payload: dict = Body(None)):
+    # Mantido só pra não quebrar nada que eventualmente use essa rota
+    return {"ok": True}
