@@ -7,3 +7,9 @@ class TranslationOut(BaseModel):
 
     class Config:
         orm_mode = True
+
+class URLRequest(BaseModel):
+    url: str
+    lang_source: str = "en"
+    lang_target: str = "pt"
+    organize: bool = True
